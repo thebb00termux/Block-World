@@ -1,0 +1,378 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>BlockWorld – Game 3D Online</title>
+<style>
+  *{box-sizing:border-box;-webkit-user-select:none;user-select:none}
+  html,body{margin:0;height:100%;overflow:hidden;background:#87ceeb;font-family:system-ui,sans-serif;color:#fff;touch-action:none}
+  canvas{display:block;touch-action:none}
+  #menu{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;background:linear-gradient(#5aa9ff,#bfe3ff);z-index:10;overflow:auto}
+  .box{background:#232830;padding:24px;border-radius:12px;width:min(460px,94vw);text-align:center;margin:12px}
+  .box h1{margin:0 0 12px;font-size:28px}
+  .box small{display:block;margin-top:14px;opacity:.65;line-height:1.5}
+  input,button{font:inherit;border:0;border-radius:8px;padding:11px;width:100%}
+  #name{margin-bottom:14px;-webkit-user-select:text;user-select:text}
+  #cards{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+  .card{background:#313845;color:#fff;text-align:left;cursor:pointer;padding:12px;line-height:1.3}
+  .card:hover{background:#3d9a6a}
+  .card b{display:block;font-size:15px;margin:4px 0}
+  .card span{font-size:12px;opacity:.8}
+  .card i{font-style:normal;font-size:26px}
+  #hud{position:fixed;left:10px;top:10px;font-size:13px;text-shadow:0 1px 3px #000;pointer-events:none}
+  #info{position:fixed;top:10px;left:50%;transform:translateX(-50%);font-size:18px;font-weight:700;text-shadow:0 2px 4px #000;pointer-events:none;text-align:center;width:70%}
+  #back{position:fixed;right:10px;top:10px;width:auto;padding:8px 14px;background:rgba(0,0,0,.5);color:#fff;cursor:pointer;z-index:5}
+  #chat{position:fixed;left:10px;bottom:10px;width:min(320px,70vw)}
+  #log{max-height:140px;overflow:hidden;font-size:13px;text-shadow:0 1px 3px #000;margin-bottom:6px}
+  #msg{background:rgba(0,0,0,.45);color:#fff;padding:8px;-webkit-user-select:text;user-select:text}
+  #jump{position:fixed;right:20px;bottom:30px;width:76px;height:76px;border-radius:50%;background:rgba(255,255,255,.35);display:none;touch-action:none}
+  #stick{position:fixed;left:30px;bottom:90px;width:110px;height:110px;border-radius:50%;background:rgba(255,255,255,.2);display:none;touch-action:none}
+  #nub{position:absolute;left:35px;top:35px;width:40px;height:40px;border-radius:50%;background:rgba(255,255,255,.6)}
+  @media (pointer:coarse){#jump,#stick{display:block}#chat{bottom:auto;top:60px}}
+</style>
+</head>
+<body>
+<div id="menu"><div class="box">
+  <h1>BlockWorld</h1>
+  <input id="name" maxlength="14" placeholder="Tên nhân vật của bạn">
+  <div id="cards"></div>
+  <small>WASD đi · Space nhảy · Kéo chuột xoay camera · Lăn chuột zoom · Enter chat · Esc về menu</small>
+</div></div>
+<div id="hud"></div><div id="info"></div>
+<button id="back" style="display:none">☰ Menu</button>
+<div id="chat"><div id="log"></div><input id="msg" maxlength="80" placeholder="Nhấn Enter để chat..."></div>
+<div id="stick"><div id="nub"></div></div><div id="jump"></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-database-compat.js"></script>
+<script>
+// ====== DÁN CẤU HÌNH FIREBASE CỦA BẠN VÀO ĐÂY ======
+const FIREBASE_CONFIG = {
+  apiKey: "YOUR_API_KEY",
+  authDomain: "YOUR_PROJECT.firebaseapp.com",
+  databaseURL: "https://YOUR_PROJECT-default-rtdb.firebaseio.com",
+  projectId: "YOUR_PROJECT",
+  appId: "YOUR_APP_ID"
+};
+// ===================================================
+
+const online = !FIREBASE_CONFIG.apiKey.startsWith("YOUR");
+let db = null;
+if (online) { firebase.initializeApp(FIREBASE_CONFIG); db = firebase.database(); }
+const $ = id => document.getElementById(id);
+const myId = "p" + Math.random().toString(36).slice(2, 9);
+const myColor = new THREE.Color().setHSL(Math.random(), .7, .55).getHex();
+let myName = "Player";
+try { $("name").value = localStorage.getItem("bw_name") || ""; } catch (e) {}
+const getBest = k => { try { const o = parseFloat(localStorage.getItem(k)); return isNaN(o) ? null : o; } catch (e) { return null; } };
+const saveBest = (k, v, low) => { const o = getBest(k); if (o === null || (low ? v < o : v > o)) { try { localStorage.setItem(k, v); } catch (e) {} return v; } return o; };
+
+// ---------- Scene ----------
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x87ceeb);
+scene.fog = new THREE.Fog(0x87ceeb, 60, 200);
+const camera = new THREE.PerspectiveCamera(70, innerWidth / innerHeight, .1, 500);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setSize(innerWidth, innerHeight);
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.shadowMap.enabled = true;
+document.body.appendChild(renderer.domElement);
+scene.add(new THREE.HemisphereLight(0xffffff, 0x88aa88, .8));
+const sun = new THREE.DirectionalLight(0xffffff, .7);
+sun.position.set(30, 60, 20); sun.castShadow = true; sun.shadow.mapSize.set(1024, 1024);
+Object.assign(sun.shadow.camera, { left: -40, right: 40, top: 40, bottom: -40, far: 150 });
+scene.add(sun, sun.target);
+const plate = new THREE.Mesh(new THREE.BoxGeometry(200, 1, 200), new THREE.MeshLambertMaterial({ color: 0x5cb85c }));
+plate.position.y = -.5; plate.receiveShadow = true; scene.add(plate);
+const grid = new THREE.GridHelper(200, 100, 0x3a8a3a, 0x3a8a3a); grid.position.y = .02; scene.add(grid);
+
+let world = new THREE.Group(); scene.add(world);
+const boxes = [];
+function addBox(x, y, z, w, h, d, c) {
+  const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), new THREE.MeshLambertMaterial({ color: c }));
+  m.position.set(x, y, z); m.castShadow = m.receiveShadow = true; world.add(m);
+  boxes.push({ x, y, z, w, h, d }); return m;
+}
+
+// ---------- Avatar ----------
+function nameSprite(text) {
+  const c = document.createElement("canvas"); c.width = 256; c.height = 64;
+  const x = c.getContext("2d"); x.font = "bold 30px sans-serif"; x.textAlign = "center";
+  x.lineWidth = 6; x.strokeStyle = "#000"; x.strokeText(text, 128, 44); x.fillStyle = "#fff"; x.fillText(text, 128, 44);
+  const s = new THREE.Sprite(new THREE.SpriteMaterial({ map: new THREE.CanvasTexture(c), depthTest: false }));
+  s.scale.set(4, 1, 1); s.position.y = 4.2; return s;
+}
+function makeAvatar(color, name) {
+  const g = new THREE.Group();
+  const part = (w, h, d, c, x, y, z, pivot) => {
+    const geo = new THREE.BoxGeometry(w, h, d); if (pivot) geo.translate(0, -h / 2, 0);
+    const m = new THREE.Mesh(geo, new THREE.MeshLambertMaterial({ color: c }));
+    m.position.set(x, y, z); m.castShadow = true; g.add(m); return m;
+  };
+  part(1.2, 1.2, .6, color, 0, 1.8, 0); part(.8, .8, .8, 0xffd9a0, 0, 2.9, 0);
+  g.armL = part(.5, 1.2, .5, 0xffd9a0, -.85, 2.4, 0, 1); g.armR = part(.5, 1.2, .5, 0xffd9a0, .85, 2.4, 0, 1);
+  g.legL = part(.55, 1.2, .55, 0x3b4a8a, -.3, 1.2, 0, 1); g.legR = part(.55, 1.2, .55, 0x3b4a8a, .3, 1.2, 0, 1);
+  g.add(nameSprite(name)); return g;
+}
+function animate(g, speed, t) {
+  const s = Math.sin(t * 10) * .9 * Math.min(speed / 8, 1);
+  g.legL.rotation.x = s; g.legR.rotation.x = -s; g.armL.rotation.x = -s; g.armR.rotation.x = s;
+}
+
+// ---------- Input ----------
+const me = { pos: new THREE.Vector3(), vel: new THREE.Vector3(), ry: 0, ground: true, speed: 0 };
+let myAvatar, yaw = 0, pitch = .35, dist = 11, chatFocus = false, running = false;
+const keys = {}, joy = { x: 0, y: 0 };
+
+addEventListener("keydown", e => {
+  if (!running) return;
+  if (e.key === "Escape") { openMenu(); return; }
+  if (e.key === "Enter") { chatFocus ? $("msg").blur() : $("msg").focus(); return; }
+  if (!chatFocus) { keys[e.code] = true; if (["Space", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(e.code)) e.preventDefault(); }
+});
+addEventListener("keyup", e => keys[e.code] = false);
+addEventListener("blur", () => { for (const k in keys) keys[k] = false; joy.x = joy.y = 0; });
+$("msg").onfocus = () => { chatFocus = true; for (const k in keys) keys[k] = false; };
+$("msg").onblur = () => chatFocus = false;
+$("msg").addEventListener("keydown", e => {
+  if (e.key === "Enter" && $("msg").value.trim()) {
+    const t = $("msg").value.trim(); $("msg").value = "";
+    if (online) db.ref("chat/" + cur).push({ n: myName, t, ts: firebase.database.ServerValue.TIMESTAMP }); else addLog(myName, t);
+    $("msg").blur();
+  }
+});
+function addLog(n, t) {
+  const d = document.createElement("div"); d.textContent = n + ": " + t; $("log").appendChild(d);
+  while ($("log").children.length > 7) $("log").firstChild.remove();
+}
+
+// Camera drag: theo dõi đúng 1 pointerId để không bị lẫn với ngón tay khác
+const cv = renderer.domElement; let cam = null;
+cv.addEventListener("pointerdown", e => { if (cam) return; cam = { id: e.pointerId, x: e.clientX, y: e.clientY }; cv.setPointerCapture(e.pointerId); });
+cv.addEventListener("pointermove", e => {
+  if (!cam || e.pointerId !== cam.id) return;
+  yaw -= (e.clientX - cam.x) * .006; pitch = Math.max(.05, Math.min(1.3, pitch + (e.clientY - cam.y) * .005));
+  cam.x = e.clientX; cam.y = e.clientY;
+});
+const endCam = e => { if (cam && e.pointerId === cam.id) cam = null; };
+cv.addEventListener("pointerup", endCam); cv.addEventListener("pointercancel", endCam);
+cv.addEventListener("contextmenu", e => e.preventDefault());
+cv.addEventListener("wheel", e => { dist = Math.max(4, Math.min(25, dist + e.deltaY * .01)); });
+
+// Joystick + nút nhảy: mỗi nút theo dõi touch.identifier riêng
+const stick = $("stick"), nub = $("nub"); let stickId = null;
+const findTouch = (list, id) => { for (const t of list) if (t.identifier === id) return t; return null; };
+function moveStick(t) {
+  const r = stick.getBoundingClientRect();
+  let dx = (t.clientX - r.left - 55) / 55, dy = (t.clientY - r.top - 55) / 55; const l = Math.hypot(dx, dy);
+  if (l > 1) { dx /= l; dy /= l; } joy.x = dx; joy.y = dy; nub.style.transform = `translate(${dx * 35}px,${dy * 35}px)`;
+}
+stick.addEventListener("touchstart", e => { e.preventDefault(); if (stickId === null) { const t = e.changedTouches[0]; stickId = t.identifier; moveStick(t); } }, { passive: false });
+stick.addEventListener("touchmove", e => { e.preventDefault(); const t = findTouch(e.changedTouches, stickId); if (t) moveStick(t); }, { passive: false });
+const endStick = e => { if (findTouch(e.changedTouches, stickId)) { stickId = null; joy.x = joy.y = 0; nub.style.transform = ""; } };
+stick.addEventListener("touchend", endStick); stick.addEventListener("touchcancel", endStick);
+$("jump").addEventListener("touchstart", e => { e.preventDefault(); keys.Space = true; }, { passive: false });
+$("jump").addEventListener("touchend", () => keys.Space = false);
+$("jump").addEventListener("touchcancel", () => keys.Space = false);
+
+// ---------- Physics ----------
+const R = .5, H = 3.3, G = 38;
+let hasFloor = true, limit = 98, spawn = new THREE.Vector3(0, 0, 8);
+function respawn() { me.pos.copy(spawn); me.vel.set(0, 0, 0); }
+function step(dt) {
+  let ix = (keys.KeyD || keys.ArrowRight ? 1 : 0) - (keys.KeyA || keys.ArrowLeft ? 1 : 0) + joy.x;
+  let iz = (keys.KeyS || keys.ArrowDown ? 1 : 0) - (keys.KeyW || keys.ArrowUp ? 1 : 0) + joy.y;
+  const l = Math.hypot(ix, iz); if (l > 1) { ix /= l; iz /= l; }
+  const sp = 14, c = Math.cos(yaw), s = Math.sin(yaw);
+  const wx = ix * c + iz * s, wz = -ix * s + iz * c;
+  me.vel.x = wx * sp; me.vel.z = wz * sp; me.speed = Math.hypot(wx, wz) * sp;
+  if (me.speed > .1) me.ry = Math.atan2(wx, wz);
+  if (keys.Space && me.ground) { me.vel.y = 17; me.ground = false; }
+  me.vel.y -= G * dt;
+  const prevY = me.pos.y; me.pos.addScaledVector(me.vel, dt); me.ground = false;
+  if (hasFloor && me.pos.y <= 0) { me.pos.y = 0; me.vel.y = 0; me.ground = true; }
+  for (const b of boxes) {
+    const top = b.y + b.h / 2, bot = b.y - b.h / 2;
+    const ox = b.w / 2 + R - Math.abs(me.pos.x - b.x), oz = b.d / 2 + R - Math.abs(me.pos.z - b.z);
+    if (ox <= 0 || oz <= 0) continue;
+    if (me.pos.y < top && me.pos.y + H > bot) {
+      if (prevY >= top - .05 && me.vel.y <= 0) { me.pos.y = top; me.vel.y = 0; me.ground = true; }
+      else if (me.pos.y + H - bot > .2 && top - me.pos.y > .2) { if (ox < oz) me.pos.x += Math.sign(me.pos.x - b.x) * ox; else me.pos.z += Math.sign(me.pos.z - b.z) * oz; }
+    }
+  }
+  if (me.pos.y < -25) respawn();
+  me.pos.x = Math.max(-limit, Math.min(limit, me.pos.x)); me.pos.z = Math.max(-limit, Math.min(limit, me.pos.z));
+}
+
+// ---------- Các game ----------
+const rnd = (a, b) => a + Math.random() * (b - a);
+const hsl = (h, s = .7, l = .6) => new THREE.Color().setHSL(h, s, l).getHex();
+let ms = {}, cur = "hub";
+const info = t => $("info").textContent = t;
+
+const MODES = {
+  hub: {
+    icon: "🌳", name: "Sảnh tự do", desc: "Chạy nhảy, leo tháp, chat cùng mọi người.",
+    build() {
+      for (let i = 0; i < 10; i++) addBox(10 + i * 4, 1 + i * 1.2, -8 - Math.sin(i) * 3, 4, 1, 4, hsl(i / 10));
+      addBox(-12, 2, -10, 8, 4, 8, 0xe0a030); addBox(-12, 5, -10, 4, 2, 4, 0xd05050); addBox(0, 1.5, -20, 14, 3, 2, 0x6a7cff);
+      for (let i = 0; i < 3; i++) addBox(-20 - i * 6, 1 + i, 10 + i * 4, 3, 2 + i * 2, 3, 0xff7ab0);
+      spawn.set(0, 0, 8); info("Tự do khám phá!");
+    }, update() {}
+  },
+  obby: {
+    icon: "🏃", name: "Obby parkour", desc: "Nhảy qua 40 bục, có checkpoint. Về đích nhanh nhất!",
+    build() {
+      hasFloor = false; plate.visible = grid.visible = false; ms = { t: 0, started: false, done: 0, cps: [], cpi: 0 };
+      for (let i = 0; i < 40; i++) {
+        const x = Math.sin(i * .8) * 7, z = -i * 7, top = i * .6, cp = i > 0 && i % 10 === 0, fin = i === 39;
+        const sz = cp || fin ? 6 : 4;
+        addBox(x, top - .5, z, sz, 1, sz, fin ? 0xffd700 : cp ? 0x2ecc71 : i === 0 ? 0x3498db : hsl(i / 40));
+        if (cp || fin) ms.cps.push({ x, y: top, z, fin });
+      }
+      spawn.set(0, 0, 0); ms.start = spawn.clone(); ms.cp = ms.start;
+    },
+    update(dt) {
+      if (ms.done > 0) { ms.done -= dt; if (ms.done <= 0) { ms.t = 0; ms.started = false; ms.cp = ms.start; spawn.copy(ms.start); respawn(); } return; }
+      if (!ms.started && me.speed > 0) ms.started = true;
+      if (ms.started) ms.t += dt;
+      ms.cps.forEach((c, i) => {
+        if (Math.hypot(me.pos.x - c.x, me.pos.z - c.z) < 3.3 && Math.abs(me.pos.y - c.y) < 1.5) {
+          if (c.fin) { const b = saveBest("bw_obby", +ms.t.toFixed(1), true); ms.done = 6; info("🏁 Về đích: " + ms.t.toFixed(1) + "s · Kỷ lục " + b + "s"); }
+          else if (ms.cpi < i + 1) { ms.cpi = i + 1; spawn.set(c.x, c.y, c.z); }
+        }
+      });
+      if (ms.done <= 0) { const b = getBest("bw_obby"); info("⏱ " + ms.t.toFixed(1) + "s · Checkpoint " + ms.cpi + "/" + (ms.cps.length - 1) + (b ? " · Kỷ lục " + b + "s" : "")); }
+    }
+  },
+  coin: {
+    icon: "🪙", name: "Săn xu", desc: "Nhặt càng nhiều xu càng tốt trong 60 giây.",
+    build() {
+      ms = { score: 0, time: 60, over: 0, coins: [], tops: [] };
+      for (let i = 0; i < 10; i++) { const x = rnd(-40, 40), z = rnd(-40, 40), h = rnd(2, 6); addBox(x, h / 2, z, rnd(3, 6), h, rnd(3, 6), hsl(Math.random())); ms.tops.push({ x, z, h }); }
+      for (let i = 0; i < 25; i++) {
+        const m = new THREE.Mesh(new THREE.CylinderGeometry(.7, .7, .15, 20).rotateX(Math.PI / 2), new THREE.MeshLambertMaterial({ color: 0xffd700, emissive: 0x665500 }));
+        world.add(m); ms.coins.push(m); this.place(m);
+      }
+      spawn.set(0, 0, 0); this.show();
+    },
+    place(m) { if (Math.random() < .4) { const t = ms.tops[Math.floor(Math.random() * ms.tops.length)]; m.position.set(t.x, t.h + 1.4, t.z); } else m.position.set(rnd(-45, 45), 1.4, rnd(-45, 45)); },
+    show() { const b = getBest("bw_coin"); info("🪙 " + ms.score + " · ⏱ " + Math.ceil(ms.time) + "s" + (b !== null ? " · Kỷ lục " + b : "")); },
+    update(dt, now) {
+      if (ms.over > 0) { ms.over -= dt; if (ms.over <= 0) { ms.score = 0; ms.time = 60; } return; }
+      ms.time -= dt;
+      for (const m of ms.coins) {
+        m.rotation.y += dt * 3;
+        if (Math.hypot(m.position.x - me.pos.x, m.position.z - me.pos.z) < 1.8 && Math.abs(m.position.y - me.pos.y - 1.5) < 2.5) { ms.score++; this.place(m); }
+      }
+      if (ms.time <= 0) { const b = saveBest("bw_coin", ms.score); ms.over = 5; info("⏰ Hết giờ! " + ms.score + " xu · Kỷ lục " + b); } else this.show();
+    }
+  },
+  dodge: {
+    icon: "☄️", name: "Né khối rơi", desc: "Khối đỏ rơi từ trời. Sống sót lâu nhất có thể!",
+    build() {
+      limit = 24; ms = { t: 0, blocks: [], acc: 0, flash: 0, msg: "" };
+      const f = new THREE.Mesh(new THREE.PlaneGeometry(49, 49).rotateX(-Math.PI / 2), new THREE.MeshBasicMaterial({ color: 0xcfe8ff })); f.position.y = .05; world.add(f);
+      spawn.set(0, 0, 0);
+    },
+    update(dt) {
+      ms.t += dt; ms.acc -= dt;
+      if (ms.acc <= 0) {
+        ms.acc = Math.max(.22, .7 - ms.t * .01);
+        const near = Math.random() < .5, x = Math.max(-23, Math.min(23, near ? me.pos.x + rnd(-6, 6) : rnd(-23, 23))), z = Math.max(-23, Math.min(23, near ? me.pos.z + rnd(-6, 6) : rnd(-23, 23)));
+        const m = new THREE.Mesh(new THREE.BoxGeometry(2.4, 2.4, 2.4), new THREE.MeshLambertMaterial({ color: 0xe03030 })); m.position.set(x, 40, z); m.castShadow = true;
+        const mk = new THREE.Mesh(new THREE.PlaneGeometry(2.6, 2.6).rotateX(-Math.PI / 2), new THREE.MeshBasicMaterial({ color: 0xff0000, transparent: true, opacity: .35 })); mk.position.set(x, .08, z);
+        world.add(m, mk); ms.blocks.push({ m, mk, v: 16 + ms.t * .12 });
+      }
+      for (let i = ms.blocks.length - 1; i >= 0; i--) {
+        const b = ms.blocks[i], p = b.m.position; p.y -= b.v * dt;
+        if (Math.abs(p.x - me.pos.x) < 1.5 && Math.abs(p.z - me.pos.z) < 1.5 && p.y - 1.2 < me.pos.y + H && p.y + 1.2 > me.pos.y) {
+          const best = saveBest("bw_dodge", +ms.t.toFixed(1)); ms.msg = "💥 Sống " + ms.t.toFixed(1) + "s · Kỷ lục " + best + "s"; ms.flash = 3;
+          ms.blocks.forEach(o => world.remove(o.m, o.mk)); ms.blocks = []; ms.t = 0; respawn(); return;
+        }
+        if (p.y <= 1.2) { world.remove(b.m, b.mk); ms.blocks.splice(i, 1); }
+      }
+      if (ms.flash > 0) { ms.flash -= dt; info(ms.msg); } else info("⏱ Sống sót: " + ms.t.toFixed(1) + "s");
+    }
+  }
+};
+
+function loadMode(id) {
+  cur = id; scene.remove(world); world = new THREE.Group(); scene.add(world); boxes.length = 0;
+  hasFloor = true; limit = 98; plate.visible = grid.visible = true; ms = {}; spawn = new THREE.Vector3(0, 0, 8);
+  MODES[id].build.call(MODES[id]); respawn(); me.ry = 0;
+  if (myAvatar) scene.remove(myAvatar); myAvatar = makeAvatar(myColor, myName); scene.add(myAvatar);
+  $("log").innerHTML = ""; joinRoom(id); running = true;
+  $("menu").style.display = "none"; $("back").style.display = "block";
+}
+
+// ---------- Menu ----------
+$("cards").innerHTML = Object.entries(MODES).map(([k, m]) => `<button class="card" data-k="${k}"><i>${m.icon}</i><b>${m.name}</b><span>${m.desc}</span></button>`).join("");
+$("cards").addEventListener("click", e => {
+  const b = e.target.closest(".card"); if (!b) return;
+  myName = $("name").value.trim() || "Player" + Math.floor(Math.random() * 999);
+  try { localStorage.setItem("bw_name", $("name").value.trim()); } catch (e) {}
+  loadMode(b.dataset.k);
+});
+function openMenu() {
+  running = false; leaveRoom(); info(""); $("menu").style.display = "flex"; $("back").style.display = "none"; $("msg").blur();
+  for (const k in keys) keys[k] = false;
+}
+$("back").onclick = openMenu;
+
+// ---------- Network (mỗi game là 1 phòng riêng) ----------
+const others = {}; let plRef = null, myRef = null, chRef = null, lastSend = 0, joinedAt = 0;
+function leaveRoom() {
+  if (plRef) { plRef.off(); chRef.off(); myRef.onDisconnect().cancel(); myRef.remove(); plRef = null; }
+  for (const id in others) { scene.remove(others[id].g); delete others[id]; }
+}
+function joinRoom(id) {
+  leaveRoom(); joinedAt = Date.now();
+  if (!online) { $("hud").textContent = "Chế độ offline (chưa cấu hình Firebase)"; return; }
+  plRef = db.ref("players/" + id); myRef = plRef.child(myId); chRef = db.ref("chat/" + id).limitToLast(1);
+  myRef.onDisconnect().remove();
+  myRef.set({ n: myName, c: myColor, x: me.pos.x, y: me.pos.y, z: me.pos.z, r: 0, s: 0 });
+  plRef.on("child_added", s => upsert(s.key, s.val())); plRef.on("child_changed", s => upsert(s.key, s.val()));
+  plRef.on("child_removed", s => { const o = others[s.key]; if (o) { scene.remove(o.g); delete others[s.key]; } });
+  chRef.on("child_added", s => { const v = s.val(); if (v.ts >= joinedAt - 2000) addLog(v.n, v.t); });
+}
+function upsert(id, v) {
+  if (id === myId || !v) return;
+  let o = others[id];
+  if (!o) { o = others[id] = { g: makeAvatar(v.c, v.n), t: new THREE.Vector3(v.x, v.y, v.z), ry: v.r, speed: 0 }; o.g.position.copy(o.t); scene.add(o.g); }
+  o.t.set(v.x, v.y, v.z); o.ry = v.r; o.speed = v.s;
+}
+function send(now) {
+  if (!myRef || now - lastSend < 100) return; lastSend = now;
+  myRef.update({ x: +me.pos.x.toFixed(2), y: +me.pos.y.toFixed(2), z: +me.pos.z.toFixed(2), r: +me.ry.toFixed(2), s: +me.speed.toFixed(1) });
+}
+
+// ---------- Loop ----------
+let last = performance.now();
+function loop(now) {
+  requestAnimationFrame(loop);
+  const dt = Math.min((now - last) / 1000, .05); last = now;
+  if (running) {
+    step(dt); MODES[cur].update.call(MODES[cur], dt, now);
+    myAvatar.position.copy(me.pos);
+    let d = me.ry - myAvatar.rotation.y; d = Math.atan2(Math.sin(d), Math.cos(d)); myAvatar.rotation.y += d * Math.min(1, dt * 14);
+    animate(myAvatar, me.ground ? me.speed : 6, now / 1000); send(now);
+    for (const id in others) {
+      const o = others[id]; o.g.position.lerp(o.t, Math.min(1, dt * 10));
+      let dd = o.ry - o.g.rotation.y; dd = Math.atan2(Math.sin(dd), Math.cos(dd)); o.g.rotation.y += dd * Math.min(1, dt * 12);
+      animate(o.g, o.speed, now / 1000);
+    }
+    const cp = me.pos.clone(); cp.y += 2.5;
+    camera.position.set(cp.x + Math.sin(yaw) * Math.cos(pitch) * dist, cp.y + Math.sin(pitch) * dist, cp.z + Math.cos(yaw) * Math.cos(pitch) * dist);
+    camera.lookAt(cp); sun.position.set(me.pos.x + 30, 60, me.pos.z + 20); sun.target.position.copy(me.pos);
+    if (online) $("hud").textContent = MODES[cur].name + " · Online: " + (Object.keys(others).length + 1);
+  }
+  renderer.render(scene, camera);
+}
+requestAnimationFrame(loop);
+addEventListener("resize", () => { camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix(); renderer.setSize(innerWidth, innerHeight); });
+</script>
+</body>
+</html>
