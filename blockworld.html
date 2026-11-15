@@ -323,7 +323,9 @@ function openMenu() {
 $("back").onclick = openMenu;
 
 // ---------- Network (mỗi game là 1 phòng riêng) ----------
-const others = {}; let plRef = null, myRef = null, chRef = null, lastSend = 0, joinedAt = 0;
+const others = {}; let plRef = null, myRef = null, chRef = null, lastSend = 0, joinedAt = 0, netErr = "", netOk = false;
+const fail = e => { netErr = "❌ Firebase lỗi: " + (e && e.code ? e.code : e) + " (kiểm tra Rules / databaseURL)"; console.error(e); };
+if (online) db.ref(".info/connected").on("value", s => netOk = !!s.val());
 function leaveRoom() {
   if (plRef) { plRef.off(); chRef.off(); myRef.onDisconnect().cancel(); myRef.remove(); plRef = null; }
   for (const id in others) { scene.remove(others[id].g); delete others[id]; }
@@ -333,10 +335,11 @@ function joinRoom(id) {
   if (!online) { $("hud").textContent = "Chế độ offline (chưa cấu hình Firebase)"; return; }
   plRef = db.ref("players/" + id); myRef = plRef.child(myId); chRef = db.ref("chat/" + id).limitToLast(1);
   myRef.onDisconnect().remove();
-  myRef.set({ n: myName, c: myColor, x: me.pos.x, y: me.pos.y, z: me.pos.z, r: 0, s: 0 });
-  plRef.on("child_added", s => upsert(s.key, s.val())); plRef.on("child_changed", s => upsert(s.key, s.val()));
-  plRef.on("child_removed", s => { const o = others[s.key]; if (o) { scene.remove(o.g); delete others[s.key]; } });
-  chRef.on("child_added", s => { const v = s.val(); if (v.ts >= joinedAt - 2000) addLog(v.n, v.t); });
+  netErr = "";
+  myRef.set({ n: myName, c: myColor, x: me.pos.x, y: me.pos.y, z: me.pos.z, r: 0, s: 0 }).catch(fail);
+  plRef.on("child_added", s => upsert(s.key, s.val()), fail); plRef.on("child_changed", s => upsert(s.key, s.val()), fail);
+  plRef.on("child_removed", s => { const o = others[s.key]; if (o) { scene.remove(o.g); delete others[s.key]; } }, fail);
+  chRef.on("child_added", s => { const v = s.val(); if (v.ts >= joinedAt - 2000) addLog(v.n, v.t); }, fail);
 }
 function upsert(id, v) {
   if (id === myId || !v) return;
@@ -367,7 +370,7 @@ function loop(now) {
     const cp = me.pos.clone(); cp.y += 2.5;
     camera.position.set(cp.x + Math.sin(yaw) * Math.cos(pitch) * dist, cp.y + Math.sin(pitch) * dist, cp.z + Math.cos(yaw) * Math.cos(pitch) * dist);
     camera.lookAt(cp); sun.position.set(me.pos.x + 30, 60, me.pos.z + 20); sun.target.position.copy(me.pos);
-    if (online) $("hud").textContent = MODES[cur].name + " · Online: " + (Object.keys(others).length + 1);
+    if (online) $("hud").textContent = netErr || (netOk ? MODES[cur].name + " · Online: " + (Object.keys(others).length + 1) : "⏳ Đang kết nối Firebase...");
   }
   renderer.render(scene, camera);
 }
