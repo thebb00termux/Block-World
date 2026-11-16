@@ -79,7 +79,8 @@ renderer.setSize(innerWidth, innerHeight);
 renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
 renderer.shadowMap.enabled = true;
 document.body.appendChild(renderer.domElement);
-scene.add(new THREE.HemisphereLight(0xffffff, 0x88aa88, .8));
+const hemi = new THREE.HemisphereLight(0xffffff, 0x88aa88, .8), lamp = new THREE.PointLight(0xffffff, 0, 45);
+scene.add(hemi, lamp);
 const sun = new THREE.DirectionalLight(0xffffff, .7);
 sun.position.set(30, 60, 20); sun.castShadow = true; sun.shadow.mapSize.set(1024, 1024);
 Object.assign(sun.shadow.camera, { left: -40, right: 40, top: 40, bottom: -40, far: 150 });
@@ -179,7 +180,7 @@ $("jump").addEventListener("touchcancel", () => keys.Space = false);
 
 // ---------- Physics ----------
 const R = .5, H = 3.3, G = 38;
-let hasFloor = true, limit = 98, spawn = new THREE.Vector3(0, 0, 8);
+let hasFloor = true, limit = 98, cx = 0, spawn = new THREE.Vector3(0, 0, 8);
 function respawn() { me.pos.copy(spawn); me.vel.set(0, 0, 0); }
 function step(dt) {
   let ix = (keys.KeyD || keys.ArrowRight ? 1 : 0) - (keys.KeyA || keys.ArrowLeft ? 1 : 0) + joy.x;
@@ -203,7 +204,7 @@ function step(dt) {
     }
   }
   if (me.pos.y < -25) respawn();
-  me.pos.x = Math.max(-limit, Math.min(limit, me.pos.x)); me.pos.z = Math.max(-limit, Math.min(limit, me.pos.z));
+  me.pos.x = Math.max(cx - limit, Math.min(cx + limit, me.pos.x)); me.pos.z = Math.max(-limit, Math.min(limit, me.pos.z));
 }
 
 // ---------- Các game ----------
@@ -299,9 +300,97 @@ const MODES = {
   }
 };
 
+// ---------- BACKROOMS (3 level, cùng 1 server) ----------
+function rng(s) { return () => (s = (s * 1664525 + 1013904223) % 4294967296) / 4294967296; }
+function maze(cols, rows, cell, ox, seed, h, col, pipes, lightCol) {
+  const rd = rng(seed), vis = [], ro = [], dn = [];
+  for (let r = 0; r < rows; r++) { vis.push(Array(cols).fill(0)); ro.push(Array(cols).fill(0)); dn.push(Array(cols).fill(0)); }
+  const st = [[0, 0]]; vis[0][0] = 1;
+  while (st.length) {
+    const [r, c] = st[st.length - 1], nb = [];
+    if (c < cols - 1 && !vis[r][c + 1]) nb.push([r, c + 1, 0]);
+    if (c > 0 && !vis[r][c - 1]) nb.push([r, c - 1, 1]);
+    if (r < rows - 1 && !vis[r + 1][c]) nb.push([r + 1, c, 2]);
+    if (r > 0 && !vis[r - 1][c]) nb.push([r - 1, c, 3]);
+    if (!nb.length) { st.pop(); continue; }
+    const [nr, nc, d] = nb[Math.floor(rd() * nb.length)]; vis[nr][nc] = 1;
+    if (d === 0) ro[r][c] = 1; else if (d === 1) ro[r][c - 1] = 1; else if (d === 2) dn[r][c] = 1; else dn[r - 1][c] = 1;
+    st.push([nr, nc]);
+  }
+  for (let r = 0; r < rows; r++) for (let c = 0; c < cols; c++) { if (c < cols - 1 && rd() < .12) ro[r][c] = 1; if (r < rows - 1 && rd() < .12) dn[r][c] = 1; }
+  const x0 = ox - cols * cell / 2, z0 = -rows * cell / 2, t = 1;
+  const pipe = (x, z, alongZ) => {
+    if (!pipes || rd() > .5) return;
+    const g = new THREE.CylinderGeometry(.35, .35, cell, 8); alongZ ? g.rotateX(Math.PI / 2) : g.rotateZ(Math.PI / 2);
+    const m = new THREE.Mesh(g, new THREE.MeshLambertMaterial({ color: 0x5a5a5a })); m.position.set(x, 6, z); world.add(m);
+  };
+  for (let r = 0; r < rows; r++) for (let i = 0; i <= cols; i++) if (i === 0 || i === cols || !ro[r][i - 1]) {
+    addBox(x0 + i * cell, h / 2, z0 + r * cell + cell / 2, t, h, cell + t, col); pipe(x0 + i * cell + (i === cols ? -.8 : .8), z0 + r * cell + cell / 2, true);
+  }
+  for (let j = 0; j <= rows; j++) for (let c = 0; c < cols; c++) if (j === 0 || j === rows || !dn[j - 1][c]) {
+    addBox(x0 + c * cell + cell / 2, h / 2, z0 + j * cell, cell + t, h, t, col); pipe(x0 + c * cell + cell / 2, z0 + j * cell + (j === rows ? -.8 : .8), false);
+  }
+  if (lightCol) for (let r = 0; r < rows; r++) for (let c = 0; c < cols; c++) if (rd() < .5) {
+    const m = new THREE.Mesh(new THREE.BoxGeometry(3, .2, 1.4), new THREE.MeshBasicMaterial({ color: lightCol }));
+    m.position.set(x0 + c * cell + cell / 2, h - .1, z0 + r * cell + cell / 2); world.add(m);
+  }
+  return { x0, z0 };
+}
+function ceiling(h, col) {
+  const c = new THREE.Mesh(new THREE.PlaneGeometry(140, 140).rotateX(Math.PI / 2), new THREE.MeshLambertMaterial({ color: col }));
+  c.position.set(cx, h, 0); world.add(c);
+}
+function exitDoor(x, z, label) {
+  const m = new THREE.Mesh(new THREE.BoxGeometry(3, 5, .4), new THREE.MeshBasicMaterial({ color: 0x7dffb0 })); m.position.set(x, 2.5, z);
+  const s = nameSprite(label); s.position.set(x, 6.5, z); s.scale.set(8, 2, 1);
+  const l = new THREE.PointLight(0x66ffaa, 1.2, 28); l.position.set(x, 3, z); world.add(m, s, l); ms.exit = { x, z };
+}
+const LV_NAMES = ["LEVEL 0 · The Lobby", "LEVEL 1 · Habitable Zone", "LEVEL 2 · Pipe Dreams"];
+MODES.backrooms = {
+  icon: "🟨", name: "Backrooms", desc: "3 level Lv0–Lv2, tìm cửa xanh để thoát. Cả server chat chung.",
+  build() { dist = 6; this.lvl(0); },
+  lvl(n) {
+    scene.remove(world); world = new THREE.Group(); scene.add(world); boxes.length = 0;
+    cx = n * 300; ms = { n, flash: 0, msg: "" }; plate.position.set(cx, -.5, 0); grid.visible = false; sun.intensity = 0;
+    const env = (bg, fn, ff, hm, lp, lc, fl) => { scene.background.setHex(bg); scene.fog.color.setHex(bg); scene.fog.near = fn; scene.fog.far = ff; hemi.intensity = hm; lamp.intensity = lp; lamp.color.setHex(lc); plate.material.color.setHex(fl); };
+    if (n === 0) {
+      env(0xb9a94a, 8, 75, .95, .35, 0xfff2b0, 0x9a8a3a); limit = 53; ceiling(8, 0xc8bb70);
+      const m = maze(10, 10, 10, cx, 11, 8, 0xd8c75a, false, 0xffffee);
+      spawn.set(m.x0 + 5, 0, m.z0 + 5); exitDoor(m.x0 + 95, m.z0 + 95, "▼ LỐI RA ▼");
+    } else if (n === 1) {
+      env(0x2a2c30, 6, 60, .4, 1, 0xffe0b0, 0x6e6e72); limit = 59; ceiling(16, 0x35363a);
+      const rd = rng(99);
+      addBox(cx, 8, -60, 122, 16, 2, 0x55575c); addBox(cx, 8, 60, 122, 16, 2, 0x55575c); addBox(cx - 60, 8, 0, 2, 16, 122, 0x55575c); addBox(cx + 60, 8, 0, 2, 16, 122, 0x55575c);
+      for (let x = -50; x <= 50; x += 20) for (let z = -50; z <= 50; z += 20) if (!(Math.abs(x) > 40 && Math.abs(z) > 40)) addBox(cx + x, 8, z, 3, 16, 3, 0x707378);
+      for (let i = 0; i < 30; i++) {
+        const x = (rd() * 2 - 1) * 55, z = (rd() * 2 - 1) * 55, h = 2 + rd() * 3; if (Math.abs(x) > 40 && Math.abs(z) > 40) continue;
+        addBox(cx + x, h / 2, z, 3 + rd() * 3, h, 3 + rd() * 3, 0x7a6a50);
+      }
+      for (let i = 0; i < 14; i++) { const m = new THREE.Mesh(new THREE.BoxGeometry(4, .2, 1.4), new THREE.MeshBasicMaterial({ color: 0xffe9b8 })); m.position.set(cx + (rd() * 2 - 1) * 55, 15.8, (rd() * 2 - 1) * 55); world.add(m); }
+      spawn.set(cx - 53, 0, -53); exitDoor(cx + 53, 53, "▼ LEVEL 2 ▼");
+    } else {
+      env(0x1a0d08, 4, 42, .3, 1.1, 0xff7744, 0x3a2a22); limit = 39; ceiling(8, 0x2a1a14);
+      const m = maze(9, 9, 8, cx, 303, 8, 0x7a4a2a, true, 0xff5533);
+      spawn.set(m.x0 + 4, 0, m.z0 + 4); exitDoor(m.x0 + 68, m.z0 + 68, "▼ THOÁT ▼");
+    }
+    respawn(); me.ry = 0;
+  },
+  update(dt) {
+    if (ms.flash > 0) { ms.flash -= dt; info(ms.msg); return; }
+    const e = ms.exit;
+    if (Math.hypot(me.pos.x - e.x, me.pos.z - e.z) < 2.5) {
+      const nx = (ms.n + 1) % 3; this.lvl(nx); ms.flash = 3;
+      ms.msg = nx === 0 ? "🎉 Bạn đã thoát Level 2! Quay về Level 0" : "➡ Đã vào Level " + nx; return;
+    }
+    info(LV_NAMES[ms.n] + " · tìm cửa xanh");
+  }
+};
+
 function loadMode(id) {
   cur = id; scene.remove(world); world = new THREE.Group(); scene.add(world); boxes.length = 0;
-  hasFloor = true; limit = 98; plate.visible = grid.visible = true; ms = {}; spawn = new THREE.Vector3(0, 0, 8);
+  hasFloor = true; limit = 98; cx = 0; dist = 11; plate.visible = grid.visible = true; ms = {}; spawn = new THREE.Vector3(0, 0, 8);
+  plate.position.set(0, -.5, 0); plate.material.color.setHex(0x5cb85c); scene.background.setHex(0x87ceeb);
+  scene.fog.color.setHex(0x87ceeb); scene.fog.near = 60; scene.fog.far = 200; hemi.intensity = .8; sun.intensity = .7; lamp.intensity = 0;
   MODES[id].build.call(MODES[id]); respawn(); me.ry = 0;
   if (myAvatar) scene.remove(myAvatar); myAvatar = makeAvatar(myColor, myName); scene.add(myAvatar);
   $("log").innerHTML = ""; joinRoom(id); running = true;
@@ -363,12 +452,14 @@ function loop(now) {
     let d = me.ry - myAvatar.rotation.y; d = Math.atan2(Math.sin(d), Math.cos(d)); myAvatar.rotation.y += d * Math.min(1, dt * 14);
     animate(myAvatar, me.ground ? me.speed : 6, now / 1000); send(now);
     for (const id in others) {
-      const o = others[id]; o.g.position.lerp(o.t, Math.min(1, dt * 10));
+      const o = others[id]; o.g.visible = cur !== "backrooms" || Math.abs(o.t.x - cx) < 150;
+      o.g.position.lerp(o.t, Math.min(1, dt * 10));
       let dd = o.ry - o.g.rotation.y; dd = Math.atan2(Math.sin(dd), Math.cos(dd)); o.g.rotation.y += dd * Math.min(1, dt * 12);
       animate(o.g, o.speed, now / 1000);
     }
     const cp = me.pos.clone(); cp.y += 2.5;
     camera.position.set(cp.x + Math.sin(yaw) * Math.cos(pitch) * dist, cp.y + Math.sin(pitch) * dist, cp.z + Math.cos(yaw) * Math.cos(pitch) * dist);
+    lamp.position.set(me.pos.x, me.pos.y + 4, me.pos.z);
     camera.lookAt(cp); sun.position.set(me.pos.x + 30, 60, me.pos.z + 20); sun.target.position.copy(me.pos);
     if (online) $("hud").textContent = netErr || (netOk ? MODES[cur].name + " · Online: " + (Object.keys(others).length + 1) : "⏳ Đang kết nối Firebase...");
   }
